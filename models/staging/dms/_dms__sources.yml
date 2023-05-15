@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: dms
+    description: Data directly from DMS
+    catalog: datalake
+    schema: dms_source
+    tables:
+      - name: fullload
+      - name: cdc

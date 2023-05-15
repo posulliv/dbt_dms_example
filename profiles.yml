@@ -1,0 +1,13 @@
+galaxy:
+  target: default
+  outputs:
+    default:
+      type: trino
+      database: "{{ env_var('GALAXY_CATALOG', '') }}"
+      host: "{{ env_var('GALAXY_HOST', '') }}"
+      port: 443
+      method: ldap
+      user: "{{ env_var('GALAXY_USER', '') }}"
+      password: "{{ env_var('GALAXY_PASSWORD', '') }}"
+      schema: "{{ env_var('GALAXY_SCHEMA', '') }}"
+      threads: 1
