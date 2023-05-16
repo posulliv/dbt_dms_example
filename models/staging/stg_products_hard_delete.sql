@@ -3,9 +3,16 @@
 {{
     config(
         materialized         = 'incremental',
+        properties           = {
+            "partitioning" : "ARRAY['last_update_time']"
+        },
         unique_key           = 'product_id',
         incremental_strategy = 'merge',
-        on_schema_change     = 'sync_all_columns'
+        on_schema_change     = 'sync_all_columns',
+        post_hook            = [
+            "DELETE FROM {{ this }} WHERE to_delete = true",
+            "ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')"
+        ]
     )
 }}
 
@@ -24,7 +31,7 @@ updates as (
       false "to_delete"
     from 
       {{ ref('stg_dms__cdc_products') }}
-    where op = 'U'
+    where op = 'U' 
     and last_update_time > (
         select max(last_update_time)
         from {{ this }}
