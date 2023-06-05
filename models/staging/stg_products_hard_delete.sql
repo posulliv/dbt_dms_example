@@ -4,14 +4,15 @@
     config(
         materialized         = 'incremental',
         properties           = {
-            "partitioning" : "ARRAY['last_update_time']"
+            "partitioning" : "ARRAY['month(last_update_time)']"
         },
         unique_key           = 'product_id',
         incremental_strategy = 'merge',
         on_schema_change     = 'sync_all_columns',
         post_hook            = [
             "DELETE FROM {{ this }} WHERE to_delete = true",
-            "ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')"
+            "ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')",
+            "ANALYZE {{ this }}"
         ]
     )
 }}
