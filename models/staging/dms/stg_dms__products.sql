@@ -1,13 +1,19 @@
 {{
     config(
-        materialized = 'view'
+        materialized = 'incremental'
     )
 }}
 
 with
 
 source as (
-    select * from {{ source('dms', 'cdc')}}
+    select * from {{ source('dms', 'products')}}
+    {% if is_incremental() %}
+      where cast(from_iso8601_timestamp(last_update_time) as timestamp(6)) > (
+        select max(last_update_time)
+        from {{ this }}
+      )
+    {% endif %}
 ),
 
 dedup as (
@@ -29,7 +35,7 @@ renamed as (
       cast(product_id as int) "product_id",
       category,
       product_name,
-      cast(quantity_available as int) "quantity",
+      cast(quantity_available as int) "quantity_available",
       cast(from_iso8601_timestamp(last_update_time) as timestamp(6)) "last_update_time"
     from dedup
 )

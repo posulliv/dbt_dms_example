@@ -6,5 +6,4 @@ sources:
     catalog: datalake
     schema: dms_source
     tables:
-      - name: fullload
-      - name: cdc
+      - name: products

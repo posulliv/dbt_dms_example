@@ -1,7 +1,15 @@
-# Overview
+# Introduction
+
+TODO
+
+The `dbt` project with all models discussed in this post can be found in 
+[this github repository](https://github.com/posulliv/dbt_dms_example).
+
+# DMS Data Overview
 
 In this example, we are going to use data from Amazon DMS to demonstrate
-how to use `dbt` and Trino with Iceberg for CDC on a data lake.
+how to use `dbt` and Trino with Iceberg for CDC on a data lake. In this article
+we assume that the DMS output is already available on S3.
 
 The data from DMS is in CSV format for this example. We will have 1 file
 for the initial load that has the following contents:
@@ -25,19 +33,59 @@ U,102,Furniture,Product 3,28,2022-03-02T11:55:40.417052Z
 D,103,Electronics,Product 4,10,2022-03-02T11:56:40.519832Z
 ```
 
-# DMS Source Models
+Notice that every row as an `op` attribute that represents the operation on the
+source record:
 
-We are going to have 2 models for the source data from DMS:
+* `I` - insert operations
+* `U` - update operations
+* `D` - delete operations
 
-* `full_load_products`
-* `cdc_products`
+DMS enables the inclusion of this attribute which we will use as part of our
+incremental `dbt` models.
 
-These models read from tables created from the CSV files. The tables created
-from the CSV files can either be created manually or via schema discovery.
+We can either use schema dicovery in Galaxy to automatically create a table from
+these CSV files or we can create an external table that reads from the folder
+on S3 the files are stored on. We will use an external table for this article.
 
-The `cdc_products` model must ensure that only the latest update for a row
-will be applied. This is achieved by just selecting the last operation for
-each row in this CTE:
+The table can be created with:
+
+```
+CREATE TABLE products (
+    op VARCHAR, 
+    product_id VARCHAR, 
+    category VARCHAR, 
+    product_name VARCHAR, 
+    quantity_available VARCHAR, 
+    last_update_time VARCHAR
+) WITH (
+    type   = 'hive',
+    format = 'CSV',
+    external_location = 's3://posullivdata/dms/products'
+)
+```
+
+# DMS Source Model
+
+We are going to have a model named `stg_dms__products` that reads from the
+source DMS table. This model will use the `incremental` materialization type
+in `dbt` so that after the initial load we will only process new CDC records
+created by DMS. We achieve this with this CTE:
+
+```
+source as (
+    select * from {{ source('dms', 'products')}}
+    {% if is_incremental() %}
+      where last_update_time > (
+        select max(last_update_time)
+        from {{ this }}
+      )
+    {% endif %}
+)
+```
+
+This model must also ensure that only the latest update for a row
+will be appied. This is achieved by selecting the last operation for each row
+in this CTE:
 
 ```
 dedup as (
@@ -51,7 +99,7 @@ dedup as (
       from source
     )
     where row_num = 1
-),
+)
 ```
 
 # Staging Models
@@ -72,28 +120,7 @@ WHEN NOT MATCHED THEN INSERT ...
 ```
 
 To have `dbt` generate a `MERGE` statement we set `incremental_strategy` to
-the value `merge`. We also need to make sure the table is create from the 
-full load table when doing the initial load or a full refresh.
-
-So first to create the model from the full load table when doing a full refresh
-we do:
-
-```
-{% if is_incremental() %}
-
-...
-
-{% else %}
-
-select 
-  {{ dbt_utils.star(from=ref('stg_dms__full_load_products')) }}
-from 
-  {{ ref('stg_dms__full_load_products') }}
-
-{% endif %}
-```
-
-The `{% else %}` portion takes care of the full refresh.
+the value `merge`.
 
 Now based on [recommendations](https://docs.getdbt.com/guides/migration/tools/migrating-from-stored-procedures/5-merges)
 from dbt documentations on how to a `MERGE` statement, we first need to write 
@@ -106,43 +133,47 @@ updates as (
     select 
       {{
         dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
+            from=ref('stg_dms__products'),
             except=["op"]
         )
       }},
       false "to_delete"
     from 
-      {{ ref('stg_dms__cdc_products') }}
+      {{ ref('stg_dms__products') }}
     where op = 'U'
+    {% if is_incremental() %}
     and last_update_time > (
         select max(last_update_time)
         from {{ this }}
     )
+    {% endif %}
 ),
 
 deletes as (
     select 
       {{
         dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
+            from=ref('stg_dms__products'),
             except=["op"]
         )
       }},
       true "to_delete"
     from 
-      {{ ref('stg_dms__cdc_products') }}
+      {{ ref('stg_dms__products') }}
     where op = 'D'
+    {% if is_incremental() %}
     and last_update_time > (
         select max(last_update_time)
         from {{ this }}
     )
+    {% endif %}
 ),
 
 inserts as (
     select 
       {{
         dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
+            from=ref('stg_dms__products'),
             except=["op"]
         )
       }},
@@ -150,15 +181,19 @@ inserts as (
     from 
       {{ ref('stg_dms__cdc_products') }}
     where op = 'I'
+    {% if is_incremental() %}
     and last_update_time > (
         select max(last_update_time)
         from {{ this }}
     )
+    {% endif %}
 )
 ```
 
 You can see the logic for the updates, inserts, and deletes CTEs is the same
 except for the op value. This could be extracted to a macro.
+
+Since this is an incremental materialization, we also only care about new rows.
 
 Finally we want to union the CTEs. `dbt` will create a temporary view that is
 joined in the generated `MERGE` statement. The generated `MERGE` will look
@@ -176,7 +211,7 @@ when not matched then insert ...
 
 There are some further considersations:
 
-1. The model assumes that the `stg_dms__cdc_products` model has no 
+1. The model assumes that the `stg_dms__products` model has no 
    duplicated data. This allows us to use `union all` instead of `union`
    which will result in more efficient query execution in Trino.
 2. We can make the `MERGE` statement more efficient and read less data
@@ -199,7 +234,7 @@ insert, update, and delete operations.
 First lets define the config for our model:
 
 ```
--- depends_on: {{ ref('stg_dms__cdc_products') }}
+-- depends_on: {{ ref('stg_dms__products') }}
 
 {{
     config(
@@ -214,77 +249,11 @@ First lets define the config for our model:
 This is going to be an incremental model and use the `merge` strategy which means
 a `MERGE` statement will be generated.
 
-First we create a CTE for each CDC operation:
-
-```
-with
-
-updates as (
-    select 
-      {{
-        dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
-            except=["op"]
-        )
-      }},
-      false "to_delete"
-    from 
-      {{ ref('stg_dms__cdc_products') }}
-    where op = 'U' 
-    and last_update_time > (
-        select max(last_update_time)
-        from {{ this }}
-    )
-),
-
-deletes as (
-    select 
-      {{
-        dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
-            except=["op"]
-        )
-      }},
-      true "to_delete"
-    from 
-      {{ ref('stg_dms__cdc_products') }}
-    where op = 'D'
-    and last_update_time > (
-        select max(last_update_time)
-        from {{ this }}
-    )
-),
-
-inserts as (
-    select 
-      {{
-        dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
-            except=["op"]
-        )
-      }},
-      false "to_delete"
-    from 
-      {{ ref('stg_dms__cdc_products') }}
-    where op = 'I'
-    and last_update_time > (
-        select max(last_update_time)
-        from {{ this }}
-    )
-)
-```
-
-Now we have all updates, inserts, and deletes that have occurred since the last
-incremental run of our model.
+We create CTEs that correspond to insert, update, and delete operations as 
+shown in the previous section.
 
 To implement the soft delete approach, we add an additional field named
 `to_delete`. This is only set to `false` in the CTE for the delete operations.
-
-The final part of our model is to union all the operations:
-
-```
-select * from updates union all select * from inserts union all select * from deletes
-```
 
 Now we can build another model `stg_products` which references this model that
 filters out any data marked as deleted:

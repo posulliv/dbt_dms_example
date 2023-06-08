@@ -1,4 +1,4 @@
--- depends_on: {{ ref('stg_dms__cdc_products') }}
+-- depends_on: {{ ref('stg_dms__products') }}
 
 {{
     config(
@@ -17,72 +17,66 @@
     )
 }}
 
-{% if is_incremental() %}
-
 with
 
 updates as (
     select 
       {{
         dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
+            from=ref('stg_dms__products'),
             except=["op"]
         )
       }},
       false "to_delete"
     from 
-      {{ ref('stg_dms__cdc_products') }}
+      {{ ref('stg_dms__products') }}
     where op = 'U' 
+    {% if is_incremental() %}
     and last_update_time > (
         select max(last_update_time)
         from {{ this }}
     )
+    {% endif %}
 ),
 
 deletes as (
     select 
       {{
         dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
+            from=ref('stg_dms__products'),
             except=["op"]
         )
       }},
       true "to_delete"
     from 
-      {{ ref('stg_dms__cdc_products') }}
+      {{ ref('stg_dms__products') }}
     where op = 'D'
+    {% if is_incremental() %}
     and last_update_time > (
         select max(last_update_time)
         from {{ this }}
     )
+    {% endif %}
 ),
 
 inserts as (
     select 
       {{
         dbt_utils.star(
-            from=ref('stg_dms__cdc_products'),
+            from=ref('stg_dms__products'),
             except=["op"]
         )
       }},
       false "to_delete"
     from 
-      {{ ref('stg_dms__cdc_products') }}
+      {{ ref('stg_dms__products') }}
     where op = 'I'
+    {% if is_incremental() %}
     and last_update_time > (
         select max(last_update_time)
         from {{ this }}
     )
+    {% endif %}
 )
 
 select * from updates union all select * from inserts union all select * from deletes
-
-{% else %}
-
-select 
-  {{ dbt_utils.star(from=ref('stg_dms__full_load_products')) }},
-  false "to_delete"
-from 
-  {{ ref('stg_dms__full_load_products') }}
-
-{% endif %}
